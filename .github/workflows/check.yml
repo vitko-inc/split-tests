@@ -1,0 +1,62 @@
+name: Check
+
+# The published action on GitHub-hosted runners, where it must run the tests once, unsplit, and
+# pass their exit status through.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  identifier-scan:
+    name: no internal identifiers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Scan
+        env:
+          IDENTIFIER_PATTERNS: ${{ secrets.IDENTIFIER_PATTERNS }}
+        run: |
+          if [ -z "$IDENTIFIER_PATTERNS" ]; then
+            echo "::notice::The identifier scan runs on maintainers' pushes (its pattern list is not available here)."
+            exit 0
+          fi
+          bash .github/scan.sh .
+
+  runs-everywhere:
+    name: runs all tests on a GitHub-hosted runner (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: A small test suite
+        run: |
+          python3 -m pip install --quiet --user pytest || python3 -m pip install --quiet --user --break-system-packages pytest
+          mkdir -p "$RUNNER_TEMP/suite"
+          printf 'def test_one():\n    assert 1\n\ndef test_two():\n    assert 2\n' > "$RUNNER_TEMP/suite/test_ok.py"
+          printf 'def test_fails():\n    assert False\n' > "$RUNNER_TEMP/suite-failing.py"
+      - name: Passing tests pass
+        id: ok
+        uses: ./
+        with:
+          run: python3 -m pytest -q ${{ runner.temp }}/suite
+      - name: Failing tests fail the step
+        id: failing
+        continue-on-error: true
+        uses: ./
+        with:
+          run: python3 -m pytest -q ${{ runner.temp }}/suite-failing.py
+      - name: Check the outcomes
+        env:
+          FAILING: ${{ steps.failing.outcome }}
+        run: test "$FAILING" = failure

@@ -1,0 +1,72 @@
+name: Split tests
+description: >-
+  Runs your test command as several parts at once, each in its own copy of this job, and reports
+  the results back in this job. On other runners it runs all your tests here, as usual.
+author: Vitko Runners
+
+inputs:
+  run:
+    description: The test command, for example `pytest -q` or `cargo nextest run --workspace`.
+    required: true
+  parts:
+    description: How many parts to split the tests into, or `auto` to let Vitko Runners choose.
+    required: false
+    default: auto
+  tool:
+    description: >-
+      The test tool (auto, pytest, nextest, jest, vitest, go or command). `auto` works it out from
+      the command. `command` runs your command in every part with VITKO_PART and VITKO_PARTS set,
+      for tools that split themselves.
+    required: false
+    default: auto
+  env:
+    description: >-
+      Names of extra environment variables your tests need, separated by spaces or new lines.
+      Variables that look like secrets are never passed.
+    required: false
+    default: ""
+  junit:
+    description: Where to write a JUnit XML report of every test. Empty to skip it.
+    required: false
+    default: vitko-split-tests.xml
+  working-directory:
+    description: The directory to run the tests in.
+    required: false
+    default: .
+  timings-file:
+    description: >-
+      A file to read and update test durations in, if you keep one (for example with a cache
+      step). Vitko Runners keeps them for you, so this is optional.
+    required: false
+    default: ""
+
+outputs:
+  junit:
+    description: Path of the JUnit XML report.
+    value: ${{ steps.split.outputs.junit }}
+  parts:
+    description: How many parts the tests ran in.
+    value: ${{ steps.split.outputs.parts }}
+  failed:
+    description: How many tests failed.
+    value: ${{ steps.split.outputs.failed }}
+
+runs:
+  using: composite
+  steps:
+    - id: split
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SPLIT_TESTS_RUN: ${{ inputs.run }}
+        SPLIT_TESTS_PARTS: ${{ inputs.parts }}
+        SPLIT_TESTS_TOOL: ${{ inputs.tool }}
+        SPLIT_TESTS_ENV: ${{ inputs.env }}
+        SPLIT_TESTS_JUNIT: ${{ inputs.junit }}
+        SPLIT_TESTS_TIMINGS: ${{ inputs.timings-file }}
+      run: |
+        args=(runners split-tests --parts "$SPLIT_TESTS_PARTS" --tool "$SPLIT_TESTS_TOOL")
+        for name in $SPLIT_TESTS_ENV; do args+=(--env "$name"); done
+        if [ -n "$SPLIT_TESTS_JUNIT" ]; then args+=(--junit "$SPLIT_TESTS_JUNIT"); fi
+        if [ -n "$SPLIT_TESTS_TIMINGS" ]; then args+=(--timings "$SPLIT_TESTS_TIMINGS"); fi
+        exec python3 "$GITHUB_ACTION_PATH/vitko" "${args[@]}" --shell "$SPLIT_TESTS_RUN"
