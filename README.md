@@ -84,6 +84,7 @@ somewhere else.
 | `timings-file` | | Optional. A file with test durations, if you keep one. Vitko Runners keeps them for you. |
 
 Outputs: `junit` (the report's path), `parts` (how many ran) and `failed` (how many tests failed).
+When the tests run unsplit (on a runner that can't split them), `parts` is `1` and there is no report: `junit` and `failed` are empty.
 
 ## How the tests are shared out
 

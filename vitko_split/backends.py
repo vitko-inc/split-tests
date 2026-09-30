@@ -108,10 +108,20 @@ class LocalBackend(Backend):
     def run_unsplit(self, argv: List[str], cwd: str) -> int:
         print("Running all tests in this job (%s)." % self.reason, flush=True)
         try:
-            return subprocess.call(argv, cwd=cwd)
+            code = subprocess.call(argv, cwd=cwd)
         except FileNotFoundError:
             print("Command not found: %s" % argv[0], file=sys.stderr, flush=True)
-            return 127
+            code = 127
+        _unsplit_outputs()
+        return code
+
+
+def _unsplit_outputs() -> None:
+    """Step outputs for an unsplit run: one part, and no report (the tests' own output is it)."""
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as f:
+            f.write("junit=\nparts=1\nfailed=\n")
 
 
 def _children_cpu_ms() -> int:
