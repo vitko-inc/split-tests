@@ -118,15 +118,31 @@ def _base(word: str) -> str:
     return os.path.basename(word)
 
 
+#: Options of runners like ``uv run`` that take a value (``uv run --with X pytest``).
+WRAPPER_VALUE_OPTIONS = frozenset([
+    "--with", "--with-editable", "--with-requirements", "--python", "-p", "--package", "--extra",
+    "--group", "--only-group", "--no-group", "--project", "--directory", "--env-file", "--index",
+    "--default-index", "--index-url", "--extra-index-url", "--find-links", "-f", "--config-file",
+])
+
+
 def detect(argv: Sequence[str]) -> str:
-    """Which tool a command runs (``command`` when we can't tell)."""
+    """Which tool a command runs (``command`` when we can't tell). Runner words and their options
+    are skipped: ``uv run --locked pytest``, ``poetry run pytest`` and ``npx jest`` are found."""
     words = list(argv)
-    while words and (
-        _base(words[0]) in ("npx", "pnpx", "bunx", "uv", "poetry", "pipenv", "env")
-        or words[0] in ("run", "exec", "--")
-        or "=" in words[0]
-    ):
-        words = words[1:]
+    wrapped = False
+    while words:
+        word = words[0]
+        if _base(word) in ("npx", "pnpx", "bunx", "uv", "poetry", "pipenv", "env") or word in ("run", "exec", "--"):
+            wrapped = True
+            words = words[1:]
+        elif "=" in word and not word.startswith("-"):
+            words = words[1:]
+        elif wrapped and word.startswith("-"):
+            takes_value = "=" not in word and word in WRAPPER_VALUE_OPTIONS
+            words = words[2:] if takes_value else words[1:]
+        else:
+            break
     if words and _base(words[0]) in ("yarn", "pnpm", "npm", "bun") and len(words) > 1:
         words = words[1:]
         if words and words[0] in ("exec", "run", "x", "dlx"):

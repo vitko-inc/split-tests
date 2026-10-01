@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -18,7 +19,30 @@ from .backends import Backend, LocalBackend, PartOutcome, PartSpec, SerialBacken
 from .envpolicy import declared_env
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SHELL_SYNTAX = re.compile(r"[\n;&|<>`$(){}*?!~#\\]|^\s*\w+=")
+_SHELL_OUTSIDE_QUOTES = set("\n;&|<>`$(){}*?!~#\\")
+
+
+def has_shell_syntax(script: str) -> bool:
+    """Whether a run line needs a shell: operators, expansions or globs outside quotes, or a
+    leading VAR=value. Quoted text is literal (``-m "not network"``, ``-skip 'A|B'``); inside
+    double quotes ``$`` and backquotes still expand."""
+    if re.match(r"^\s*\w+=", script):
+        return True
+    quote = None
+    for char in script:
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif quote == '"':
+            if char == '"':
+                quote = None
+            elif char in "$`\\":
+                return True
+        elif char in "'\"":
+            quote = char
+        elif char in _SHELL_OUTSIDE_QUOTES:
+            return True
+    return quote is not None  # an unclosed quote: let the shell report it
 USAGE = "vitko runners split-tests [options] -- <test command>"
 
 
@@ -53,6 +77,12 @@ def parse_args(argv: Sequence[str]) -> Tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--backend", default="auto", choices=("auto", "host", "local", "serial"))
     parser.add_argument("--working-directory", default=".", metavar="DIR")
     parser.add_argument("--shell", metavar="SCRIPT", help="the test command as one string (the action's run input)")
+    parser.add_argument(
+        "--prepare",
+        metavar="SCRIPT",
+        help="a shell command to run first, in this job, with network (install dependencies, build); "
+        "the parts can't reach the network",
+    )
     parser.add_argument("--results", metavar="PATH", help="write every test's outcome as JSON (for parity checks)")
     args = parser.parse_args(words)
     if args.parts != "auto" and not re.fullmatch(r"[1-9][0-9]{0,2}", args.parts):
@@ -71,7 +101,7 @@ def resolve_command(args: argparse.Namespace, command: List[str]) -> Tuple[Optio
     if command:
         return command, None
     script = args.shell.strip()
-    if not SHELL_SYNTAX.search(script):
+    if not has_shell_syntax(script):
         return shlex.split(script), None
     if args.tool == "command":
         return ["bash", "-c", script], None
@@ -94,11 +124,25 @@ def choose_backend(name: str, timings_key: str) -> Backend:
         return LocalBackend(str(error) or "splitting needs a Vitko runner")
 
 
+def run_prepare(script: str, cwd: str) -> int:
+    """The setup command, here in the job (with network), before anything is split."""
+    print("Preparing: %s" % script, flush=True)
+    code = subprocess.run(["bash", "-c", script], cwd=cwd, check=False).returncode
+    if code != 0:
+        message = "The prepare command failed with exit status %d; the tests did not run." % code
+        print("::error::%s" % message if results.in_github_actions() else message, flush=True)
+    return code
+
+
 def main(argv: Sequence[str]) -> int:
     try:
         args, command = parse_args(argv)
         argv_resolved, unsplittable = resolve_command(args, command)
         cwd = os.path.abspath(args.working_directory)
+        if args.prepare and args.prepare.strip():
+            code = run_prepare(args.prepare, cwd)
+            if code != 0:
+                return code
         if argv_resolved is None:
             return LocalBackend(unsplittable or "").run_unsplit(["bash", "-c", args.shell], cwd)
         tool = adapters.detect(argv_resolved) if args.tool == "auto" else args.tool
@@ -180,6 +224,12 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
         if prepared.exit_code is not None:
             return prepared.exit_code
         requested = None if args.parts == "auto" else int(args.parts)
+        if requested is None and tool == "command" and not uses_part_variables(argv):
+            # Every part would run the whole command: more time and money, nothing split.
+            print("Running in one part: the command doesn't use VITKO_PART or VITKO_PARTS, so every part "
+                  "would run all of it. Run a test tool this action splits (pytest, cargo nextest, jest, "
+                  "vitest, go test), or split with those variables and set parts.", flush=True)
+            requested = 1
         parts = plan.choose_parts(requested, backend.max_parts(), prepared.unit_count, timings, prepared.units or (),
                                   adapter.unit_guess)
         groups = plan.partition(prepared.units, parts, timings) if prepared.units is not None else None
@@ -201,6 +251,11 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
         return 0 if report.ok() else 1
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def uses_part_variables(argv: Sequence[str]) -> bool:
+    """Whether a command for ``--tool command`` splits itself with VITKO_PART / VITKO_PARTS."""
+    return any("VITKO_PART" in word for word in argv)
 
 
 def short_suite_notice(tool: str, found: Tuple[float, str], count: int) -> str:

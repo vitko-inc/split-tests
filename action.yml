@@ -8,6 +8,13 @@ inputs:
   run:
     description: The test command, for example `pytest -q` or `cargo nextest run --workspace`.
     required: true
+  prepare:
+    description: >-
+      A command to run first, in this job, before the tests are split: install dependencies and
+      build here (for example `uv sync --locked` or `npm ci`). The parts can't reach the network,
+      so anything they would download must be ready before the split.
+    required: false
+    default: ""
   parts:
     description: How many parts to split the tests into, or `auto` to let Vitko Runners choose.
     required: false
@@ -64,9 +71,11 @@ runs:
         SPLIT_TESTS_ENV: ${{ inputs.env }}
         SPLIT_TESTS_JUNIT: ${{ inputs.junit }}
         SPLIT_TESTS_TIMINGS: ${{ inputs.timings-file }}
+        SPLIT_TESTS_PREPARE: ${{ inputs.prepare }}
       run: |
         args=(runners split-tests --parts "$SPLIT_TESTS_PARTS" --tool "$SPLIT_TESTS_TOOL")
         for name in $SPLIT_TESTS_ENV; do args+=(--env "$name"); done
         if [ -n "$SPLIT_TESTS_JUNIT" ]; then args+=(--junit "$SPLIT_TESTS_JUNIT"); fi
         if [ -n "$SPLIT_TESTS_TIMINGS" ]; then args+=(--timings "$SPLIT_TESTS_TIMINGS"); fi
+        if [ -n "$SPLIT_TESTS_PREPARE" ]; then args+=(--prepare "$SPLIT_TESTS_PREPARE"); fi
         exec python3 "$GITHUB_ACTION_PATH/vitko" "${args[@]}" --shell "$SPLIT_TESTS_RUN"
