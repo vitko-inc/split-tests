@@ -58,7 +58,9 @@ Replace your test step with the `vitko-inc/split-tests` action, and put your tes
 
 **Anything else.** Set `tool: command`. Your command then runs in every part with two
 environment variables, `VITKO_PART` (1, 2, …) and `VITKO_PARTS` (how many), and it chooses its
-own share of the tests. Most test tools have an option for this.
+own share of the tests. Most test tools have an option for this. If the command doesn't use
+`VITKO_PART` or `VITKO_PARTS`, `parts: auto` runs it once, since every part would otherwise run
+all of it.
 
 ```yaml
 - uses: vitko-inc/split-tests@v1
@@ -67,15 +69,50 @@ own share of the tests. Most test tools have an option for this.
     run: ./scripts/run-tests.sh --part "$VITKO_PART" --of "$VITKO_PARTS"
 ```
 
-Put a single test command in `run`. If `run` is a shell script (with `&&`, pipes, variables or
+Run the test tool itself in `run` (for example `uv run pytest`, not a wrapper such as `tox` or
+`make test`), so the action can see the tests and share them out. Put a single test command in `run`. If `run` is a shell script (with `&&`, pipes, variables or
 several lines), the tests run in one part, and the log says so. Use `working-directory` to run
 somewhere else.
+
+## Install and build before the split
+
+The copies are made when the tests start, and **they can't reach the network**. Everything your
+tests need must be installed and built before that: in an earlier step, or in `prepare`, which
+runs in this job first, with network:
+
+```yaml
+- uses: vitko-inc/split-tests@v1
+  with:
+    prepare: uv sync --locked
+    run: uv run --locked pytest -q
+```
+
+A command that installs or builds as it starts (for example `tox`, or `uv run` with an
+environment that isn't synced yet) does that in every part, and fails there because the parts
+can't download anything.
+
+## Tests that need the network
+
+Tests that download things or call outside services can't run in the parts. Mark them, leave
+them out of the split, and run them in a separate step:
+
+```yaml
+- uses: vitko-inc/split-tests@v1
+  with:
+    run: pytest -q -m "not network"
+- run: pytest -q -m network
+```
+
+With Go, `go test -skip 'TestLive|TestIntegration' ./...` in the split and
+`go test -run 'TestLive|TestIntegration' ./...` in a separate step does the same. With Jest or
+Vitest, use a separate config or a file-name pattern for the network tests.
 
 ## Inputs
 
 | Input | Default | What it does |
 |---|---|---|
 | `run` | (required) | Your test command. |
+| `prepare` | | A command to run first, in this job, with network: install dependencies and build. |
 | `parts` | `auto` | How many parts. `auto` picks a number that suits your plan and the size of your test suite: a suite estimated at under a minute runs in one part, because splitting it would cost more time and money than it saves. |
 | `tool` | `auto` | `pytest`, `nextest`, `jest`, `vitest`, `go` or `command`. `auto` works it out from `run`. |
 | `env` | | Extra environment variables your tests need, by name. |
@@ -144,8 +181,8 @@ charged.
 
 - Up to your plan's limit of parts at once. With `auto`, fewer parts when the suite is short, and one part when it's estimated at under a minute (from past timings, or from the number of tests the first time). The log says so; set `parts` to a number to split anyway.
 - One split-tests step at a time in a job, and up to four in one job.
-- The parts can't reach the network, so tests that download things at run time fail in parts.
-  Fetch what they need in an earlier step.
+- The parts can't reach the network: install and build before the split (see above), and run
+  tests that need the network in a separate step.
 - Tests that depend on running in a fixed order, or on each other, can fail when split, as they
   can with any parallel test runner.
 
