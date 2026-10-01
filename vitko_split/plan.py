@@ -7,11 +7,15 @@ import heapq
 import json
 import os
 import statistics
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 TIMINGS_VERSION = 1
 #: With timings, don't make parts shorter than this: each copy of the job has a fixed start cost.
 TARGET_PART_SECONDS = 30.0
+#: ``--parts auto`` runs one part when the suite is estimated to take less than this: below it,
+#: making the copies and starting each part costs more time and money than the parts save.
+#: Same as two target-length parts.
+SPLIT_MIN_SECONDS = 2 * TARGET_PART_SECONDS
 DEFAULT_SECONDS = 1.0
 
 
@@ -49,21 +53,39 @@ def partition(ids: Sequence[str], parts: int, timings: Optional[Dict[str, float]
     return round_robin(ids, parts)
 
 
+def suite_estimate(
+    ids: Sequence[str], timings: Optional[Dict[str, float]], unit_guess: Optional[float]
+) -> Optional[Tuple[float, str]]:
+    """Estimated seconds for the whole suite and where the estimate comes from: past timings when
+    they cover at least half the tests, else the number of tests times a per-tool guess (when the
+    tool has one), else None (no estimate)."""
+    if timings and ids and sum(1 for i in ids if i in timings) * 2 >= len(ids):
+        return sum(estimate(ids, timings)), "timings"
+    if ids and unit_guess:
+        return len(ids) * unit_guess, "count"
+    return None
+
+
 def choose_parts(
     requested: Optional[int],
     max_parts: int,
     units: Optional[int],
     timings: Optional[Dict[str, float]] = None,
     ids: Sequence[str] = (),
+    unit_guess: Optional[float] = None,
 ) -> int:
-    """How many parts to run. ``requested`` None means auto."""
+    """How many parts to run. ``requested`` None means auto: one part when the estimated suite is
+    shorter than SPLIT_MIN_SECONDS, else about one part per TARGET_PART_SECONDS, up to the limit."""
     limit = max(1, max_parts)
     if units is not None:
         limit = min(limit, max(1, units))
     if requested is not None:
         return max(1, min(requested, limit))
-    if timings and ids and sum(1 for i in ids if i in timings) * 2 >= len(ids):
-        total = sum(estimate(ids, timings))
+    found = suite_estimate(ids, timings, unit_guess)
+    if found is not None:
+        total, _ = found
+        if total < SPLIT_MIN_SECONDS:
+            return 1
         limit = min(limit, max(1, int(total // TARGET_PART_SECONDS)))
     return limit
 

@@ -36,6 +36,9 @@ HOST_PORT = 5207
 COPY_PORT = 5208
 MAX_LINE = 1 << 20
 MAX_FILE = 32 << 20
+#: Result files are sent in pieces of at most this many base64 characters when the host asks for
+#: it (``fileChunkBytes`` in ``run``), so no message comes near MAX_LINE.
+MAX_FILE_CHUNK = 512 << 10
 PAUSE_LIMIT_S = 120
 COMMAND_LIMIT_S = 20
 # Same rule as envpolicy.refused (this file runs on its own; a test keeps the two equal).
@@ -264,7 +267,20 @@ def run_part(req: dict, host: Lines) -> None:
     host.send({"type": "ready", "checks": checks})
     collect = spec.get("collectOnce")
     code = run_collected(collect, part, host) if collect else run_command(spec, host)
-    host.send({"type": "done", "exit": code, "files": read_files(spec.get("resultFiles", []))})
+    files = read_files(spec.get("resultFiles", []))
+    chunk = int(req.get("fileChunkBytes") or 0)
+    if chunk > 0:
+        send_file_chunks(files, host, min(chunk, MAX_FILE_CHUNK))
+        files = {}
+    host.send({"type": "done", "exit": code, "files": files})
+
+
+def send_file_chunks(files: Dict[str, str], host: Lines, chunk: int) -> None:
+    """Each result file as ``file`` messages of at most ``chunk`` base64 characters, in order.
+    An empty file is one message with no data."""
+    for name, blob in files.items():
+        for start in range(0, max(len(blob), 1), chunk):
+            host.send({"type": "file", "name": name, "data": blob[start:start + chunk]})
 
 
 def run_command(spec: dict, host: Lines) -> int:
@@ -388,7 +404,8 @@ def split(req: dict, cli: Lines) -> None:
         return
     conn.settimeout(None)
     host = Lines(conn)
-    host.send({"type": "hello", "protocol": PROTOCOL, "timingsKey": req.get("timingsKey")})
+    # fileChunks: this helper and its CLI accept result files as ``part-file`` pieces.
+    host.send({"type": "hello", "protocol": PROTOCOL, "timingsKey": req.get("timingsKey"), "fileChunks": True})
     welcome = host.recv()
     if not welcome or welcome.get("type") != "welcome":
         cli.send({"type": "failed", "reason": (welcome or {}).get("reason", "the runner host refused")})

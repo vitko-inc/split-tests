@@ -25,6 +25,8 @@ JOB_PORT = 5207
 PROBE_TIMEOUT_S = 3
 HELPER_START_TIMEOUT_S = 20
 MAX_LINE = 1 << 20
+#: Result files of one part, as base64 (the host's own bound is the same).
+MAX_PART_FILES = 64 << 20
 HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "helper.py")
 
 
@@ -175,6 +177,8 @@ class HostBackend(Backend):
                                "timingsKey": self.timings_key})
         self._split = lines
         outputs: Dict[int, List[str]] = {s.part: [] for s in specs}
+        pieces: Dict[int, Dict[str, List[str]]] = {}
+        piece_bytes: Dict[int, int] = {}
         done: Dict[int, PartOutcome] = {}
         started_any = False
         while True:
@@ -194,9 +198,18 @@ class HostBackend(Backend):
                 data = str(msg.get("data", ""))
                 outputs.setdefault(part, []).append(data)
                 on_event({"type": "output", "part": part, "data": data})
+            elif kind == "part-file":
+                part, name, data = int(msg["part"]), str(msg.get("name", "")), str(msg.get("data", ""))
+                piece_bytes[part] = piece_bytes.get(part, 0) + len(data)
+                if piece_bytes[part] > MAX_PART_FILES:
+                    raise HostFailed("part %d sent more than %d MiB of result files" % (part, MAX_PART_FILES >> 20))
+                pieces.setdefault(part, {}).setdefault(name, []).append(data)
             elif kind == "part":
                 part = int(msg["part"])
-                files = {name: base64.b64decode(blob) for name, blob in (msg.get("files") or {}).items()}
+                blobs = dict(msg.get("files") or {})
+                for name, chunks in pieces.pop(part, {}).items():
+                    blobs[name] = "".join(chunks)
+                files = {name: base64.b64decode(blob) for name, blob in blobs.items()}
                 if msg.get("reason"):  # the host could not run this part: say why, in its log
                     outputs.setdefault(part, []).append("\nThis part did not run: %s\n" % msg["reason"])
                 outcome = PartOutcome(part, int(msg.get("exit", 1)), "".join(outputs.get(part, [])), files,
