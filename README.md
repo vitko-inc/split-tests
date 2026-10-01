@@ -76,7 +76,7 @@ somewhere else.
 | Input | Default | What it does |
 |---|---|---|
 | `run` | (required) | Your test command. |
-| `parts` | `auto` | How many parts. `auto` picks a number that suits your plan and the size of your test suite. |
+| `parts` | `auto` | How many parts. `auto` picks a number that suits your plan and the size of your test suite: a suite estimated at under a minute runs in one part, because splitting it would cost more time and money than it saves. |
 | `tool` | `auto` | `pytest`, `nextest`, `jest`, `vitest`, `go` or `command`. `auto` works it out from `run`. |
 | `env` | | Extra environment variables your tests need, by name. |
 | `junit` | `vitko-split-tests.xml` | Where to write a JUnit report of every test. Empty to skip it. |
@@ -142,7 +142,7 @@ charged.
 
 ## Limits
 
-- Up to your plan's limit of parts at once. With `auto`, fewer parts when the suite is short.
+- Up to your plan's limit of parts at once. With `auto`, fewer parts when the suite is short, and one part when it's estimated at under a minute (from past timings, or from the number of tests the first time). The log says so; set `parts` to a number to split anyway.
 - One split-tests step at a time in a job, and up to four in one job.
 - The parts can't reach the network, so tests that download things at run time fail in parts.
   Fetch what they need in an earlier step.

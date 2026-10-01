@@ -180,9 +180,14 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
         if prepared.exit_code is not None:
             return prepared.exit_code
         requested = None if args.parts == "auto" else int(args.parts)
-        parts = plan.choose_parts(requested, backend.max_parts(), prepared.unit_count, timings, prepared.units or ())
+        parts = plan.choose_parts(requested, backend.max_parts(), prepared.unit_count, timings, prepared.units or (),
+                                  adapter.unit_guess)
         groups = plan.partition(prepared.units, parts, timings) if prepared.units is not None else None
         announce(tool, parts, prepared, timings)
+        if requested is None and parts == 1 and backend.max_parts() > 1:
+            found = plan.suite_estimate(prepared.units or (), timings, adapter.unit_guess)
+            if found is not None and found[0] < plan.SPLIT_MIN_SECONDS:
+                print(short_suite_notice(tool, found, len(prepared.units or ())), flush=True)
         specs = adapter.specs(groups, parts)
         runner = backend if parts > 1 else SerialBackend()
         outcomes = runner.run_parts(plan_dir, specs, on_event(parts))
@@ -196,6 +201,14 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
         return 0 if report.ok() else 1
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
+
+
+def short_suite_notice(tool: str, found: Tuple[float, str], count: int) -> str:
+    seconds, source = found
+    noun = "packages" if tool == "go" else "tests"
+    basis = "from past timings" if source == "timings" else "from the number of %s (%d)" % (noun, count)
+    return ("Running in one part: these tests take about %ds (%s), and splitting pays off from about %ds. "
+            "Use --parts N to split anyway." % (round(seconds), basis, round(plan.SPLIT_MIN_SECONDS)))
 
 
 def announce(tool: str, parts: int, prepared: adapters.Prepared, timings: Optional[Dict[str, float]]) -> None:

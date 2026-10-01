@@ -47,6 +47,9 @@ class Parsed:
 
 class Adapter:
     tool = "command"
+    #: Seconds per unit (test or package) assumed when there are no past timings, for
+    #: ``--parts auto``'s short-suite rule; None: no guess (the tool shards by itself).
+    unit_guess: Optional[float] = None
     #: Parts report per-test results, so a part that fails without any is broken.
     expect_results = True
 
@@ -192,6 +195,7 @@ class CommandAdapter(Adapter):
 
 class PytestAdapter(Adapter):
     tool = "pytest"
+    unit_guess = 0.1  # seconds per test, when there are no past timings
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -419,6 +423,7 @@ def _section_after(lines: List[str], start: int, limit: int = 200) -> str:
 
 class NextestAdapter(Adapter):
     tool = "nextest"
+    unit_guess = 0.1  # seconds per test, when there are no past timings
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -649,6 +654,9 @@ def parse_go_events(text: str, part: int) -> Tuple[List[TestResult], Set[str], D
             r.output = "".join(output.get(r.id, []))
     for pkg, outcome in packages.items():
         if outcome == "failed" and not any(r.failed and r.suite == pkg for r in results):
+            # Also the output of tests that never reported (a panic or a timeout ends the package).
+            unfinished = [k for k in output if k.startswith(pkg + " ") and k not in tests]
+            text = "".join(output.get(pkg, [])) + "".join("".join(output[k]) for k in unfinished)
             results.append(
                 TestResult(
                     id=pkg,
@@ -656,7 +664,7 @@ def parse_go_events(text: str, part: int) -> Tuple[List[TestResult], Set[str], D
                     part=part,
                     suite=pkg,
                     name="(package)",
-                    output="".join(output.get(pkg, [])) or "the package failed to build or run",
+                    output=text or "the package failed to build or run",
                 )
             )
     return results, set(packages), elapsed
@@ -664,6 +672,7 @@ def parse_go_events(text: str, part: int) -> Tuple[List[TestResult], Set[str], D
 
 class GoAdapter(Adapter):
     tool = "go"
+    unit_guess = 5.0  # seconds per package, when there are no past timings
 
     def __init__(self, ctx):
         super().__init__(ctx)
