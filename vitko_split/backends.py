@@ -97,31 +97,80 @@ def write_plan_dir(plan_dir: str, specs: List[PartSpec]) -> None:
             json.dump(spec.to_json(), f)
 
 
+#: Why a run went unsplit, as the ``unsplit-reason`` output (stable words for workflows).
+UNSPLIT_REASONS = {
+    "host-busy": "this runner had no room to split the tests",
+    "not-vitko": "splitting needs a Vitko runner",
+    "setup": "this job can't start the helper that makes copies",
+    "host-error": "the runner couldn't make copies of this job",
+    "turned-off": "splitting was turned off",
+    "shell-script": "the run line is a shell script",
+}
+
+
+def unsplit_code(reason: str) -> str:
+    """A stable word for a reason the host or the setup gave."""
+    text = reason.lower()
+    if "busy" in text or "the limit" in text:
+        return "host-busy"
+    if "needs a vitko runner" in text:
+        return "not-vitko"
+    if "sudo" in text or "systemd" in text or "helper" in text or "collection" in text:
+        return "setup"
+    if "turned off" in text:
+        return "turned-off"
+    if "shell syntax" in text:
+        return "shell-script"
+    return "host-error"
+
+
 class LocalBackend(Backend):
-    """Runs the whole command once, unsplit, exactly as the step would have."""
+    """Runs the whole command once, unsplit, exactly as the step would have, and says why."""
 
     name = "local"
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, code: Optional[str] = None, requested: Optional[int] = None,
+                 allowed: Optional[int] = None) -> None:
         self.reason = reason
+        self.code = code or unsplit_code(reason)
+        self.requested, self.allowed = requested, allowed
 
     def run_unsplit(self, argv: List[str], cwd: str) -> int:
         print("Running all tests in this job (%s)." % self.reason, flush=True)
+        report_unsplit(self.code, self.reason, self.requested, self.allowed)
         try:
             code = subprocess.call(argv, cwd=cwd)
         except FileNotFoundError:
             print("Command not found: %s" % argv[0], file=sys.stderr, flush=True)
             code = 127
-        _unsplit_outputs()
+        _unsplit_outputs(self.code, self.requested, self.allowed)
         return code
 
 
-def _unsplit_outputs() -> None:
-    """Step outputs for an unsplit run: one part, and no report (the tests' own output is it)."""
+def report_unsplit(code: str, reason: str, requested: Optional[int], allowed: Optional[int]) -> None:
+    """Say, where people look (annotations and the run's summary), that the tests ran unsplit."""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    asked = "; parts asked for: %s" % (requested if requested else "auto")
+    room = ", allowed: %d" % allowed if allowed is not None else ""
+    print("::notice title=Tests ran unsplit::All tests ran in this job: %s (%s%s%s)."
+          % (reason, code, asked, room), flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("### Split tests: ran unsplit\n\nAll tests ran in this job, in one part.\n\n"
+                    "| Reason | Code | Parts asked for | Parts allowed |\n|---|---|---:|---:|\n"
+                    "| %s | `%s` | %s | %s |\n\n" % (reason, code, requested or "auto",
+                                                   allowed if allowed is not None else "-"))
+
+
+def _unsplit_outputs(code: str = "", requested: Optional[int] = None, allowed: Optional[int] = None) -> None:
+    """Step outputs for an unsplit run: one part, why, and no report (the tests' own output is it)."""
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as f:
-            f.write("junit=\nparts=1\nfailed=\n")
+            f.write("junit=\nparts=1\nfailed=\nunsplit-reason=%s\nparts-requested=%s\nparts-allowed=%s\n"
+                    % (code, requested or "auto", "" if allowed is None else allowed))
 
 
 def _children_cpu_ms() -> int:

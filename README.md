@@ -114,13 +114,16 @@ Vitest, use a separate config or a file-name pattern for the network tests.
 | `run` | (required) | Your test command. |
 | `prepare` | | A command to run first, in this job, with network: install dependencies and build. |
 | `parts` | `auto` | How many parts. `auto` picks a number that suits your plan and the size of your test suite: a suite estimated at under a minute runs in one part, because splitting it would cost more time and money than it saves. |
+| `wait-for-capacity` | `90` | When the runner has no room to split right now, how many seconds to keep asking before running the tests unsplit. `0` doesn't wait. |
 | `tool` | `auto` | `pytest`, `nextest`, `jest`, `vitest`, `go` or `command`. `auto` works it out from `run`. |
 | `env` | | Extra environment variables your tests need, by name. |
 | `junit` | `vitko-split-tests.xml` | Where to write a JUnit report of every test. Empty to skip it. |
 | `working-directory` | `.` | Where to run the tests. |
 | `timings-file` | | Optional. A file with test durations, if you keep one. Vitko Runners keeps them for you. |
 
-Outputs: `junit` (the report's path), `parts` (how many ran) and `failed` (how many tests failed).
+Outputs: `junit` (the report's path), `parts` (how many ran), `failed` (how many tests failed),
+`unsplit-reason` (why the tests ran in one part; empty when they were split), `parts-requested`
+and `parts-allowed`.
 When the tests run unsplit (on a runner that can't split them), `parts` is `1` and there is no report: `junit` and `failed` are empty.
 
 ## How the tests are shared out
@@ -154,6 +157,28 @@ The parts have no network access, and the original job is the only one that talk
 your tests need a service such as a database, start it before this step: each part gets its own
 copy of it, already running.
 
+## When the tests run unsplit
+
+Sometimes the tests run in one part, in this job: the runner has no room to make copies right now,
+the run isn't on Vitko Runners, the suite is too short to gain from splitting, or the command
+can't split itself. The step still runs every test and passes or fails on them. It also says why,
+where you'll see it: a notice on the run, a section in the run's summary (with the parts asked
+for and allowed), and the `unsplit-reason` output:
+
+| `unsplit-reason` | Meaning |
+|---|---|
+| `host-busy` | The runner had no room to split, even after `wait-for-capacity` seconds. |
+| `not-vitko` | Not running on Vitko Runners. |
+| `setup` | The job couldn't start the helper that makes copies (it needs passwordless `sudo`). |
+| `host-error` | The runner couldn't make copies of this job. |
+| `turned-off` | Splitting was turned off. |
+| `shell-script` | `run` is a shell script, not a single test command. |
+| `short-suite` | `parts: auto` chose one part: the suite takes under a minute. |
+| `command-not-split` | `parts: auto` chose one part: a `tool: command` command that doesn't use `VITKO_PART`. |
+
+When the runner is busy, the step asks again for up to `wait-for-capacity` seconds (90 by
+default), with pauses that grow from 5 to 30 seconds, before running the tests unsplit.
+
 ## What you see in the job
 
 - A line as each part starts and finishes.
@@ -185,6 +210,9 @@ charged.
   tests that need the network in a separate step.
 - Tests that depend on running in a fixed order, or on each other, can fail when split, as they
   can with any parallel test runner.
+- Jest and Vitest give each part whole test files, as their own `--shard` does. A run can't be
+  shorter than its longest file, so one long file limits the gain; the summary says when that
+  happens. Splitting the file into smaller files helps.
 
 ## Versions
 

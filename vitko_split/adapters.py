@@ -68,6 +68,10 @@ class Adapter:
     def timings(self, results: Sequence[TestResult]) -> Dict[str, float]:
         return {r.id: r.seconds for r in results if r.seconds > 0}
 
+    def notes(self, report) -> List[str]:
+        """Advice for the summary after a run (not problems: they don't fail the step)."""
+        return []
+
     def extra_problems(self, results: Sequence[TestResult]) -> List[str]:
         return []
 
@@ -529,9 +533,32 @@ def parse_jest_json(data: dict, cwd: str, part: int) -> List[TestResult]:
     return results
 
 
+#: A test file this share of the whole run (and at least this long) bounds any split of it.
+DOMINANT_FILE_SHARE = 0.4
+DOMINANT_FILE_SECONDS = 60.0
+
+
+def dominant_file_notes(file_seconds: Dict[str, float], parts: int) -> List[str]:
+    """Jest and Vitest give each part whole files, so a part can't finish before its longest
+    file: say so when one file is a large share of the run."""
+    total = sum(file_seconds.values())
+    if parts < 2 or total <= 0:
+        return []
+    name, longest = max(file_seconds.items(), key=lambda kv: kv[1])
+    if longest < DOMINANT_FILE_SECONDS or longest < DOMINANT_FILE_SHARE * total:
+        return []
+    return ["%s took %ds of the %ds all test files took. Each test file runs whole in one part, so "
+            "splitting can't make the run shorter than that file; splitting the file into smaller "
+            "files would." % (name, round(longest), round(total))]
+
+
 class JestAdapter(Adapter):
     tool = "jest"
     list_args = ["--listTests"]
+
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.file_seconds: Dict[str, float] = {}
 
     def result_file(self, k: int) -> str:
         return os.path.join(self.ctx.plan_dir, "%s-part-%d.json" % (self.tool, k))
@@ -558,7 +585,16 @@ class JestAdapter(Adapter):
             data = json.loads(raw.decode("utf-8", "replace"))
         except ValueError:
             return Parsed([], problem="Part %d of %d wrote unreadable results" % (spec.part, spec.parts))
+        for suite in data.get("testResults", []):
+            start, end = suite.get("startTime"), suite.get("endTime")
+            if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start:
+                name = suite.get("name", "?")
+                name = os.path.relpath(name, self.ctx.cwd) if os.path.isabs(name) else name
+                self.file_seconds[name] = (end - start) / 1000.0
         return Parsed(parse_jest_json(data, self.ctx.cwd, spec.part))
+
+    def notes(self, report):
+        return dominant_file_notes(self.file_seconds, len(report.parts))
 
     def extra_problems(self, results):
         return [] if results else ["No tests found in any part"]
