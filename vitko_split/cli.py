@@ -15,7 +15,7 @@ import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import adapters, plan, results
-from .backends import Backend, LocalBackend, PartOutcome, PartSpec, SerialBackend
+from .backends import unsplit_code, Backend, LocalBackend, PartOutcome, PartSpec, SerialBackend
 from .envpolicy import declared_env
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +44,10 @@ def has_shell_syntax(script: str) -> bool:
             return True
     return quote is not None  # an unclosed quote: let the shell report it
 USAGE = "vitko runners split-tests [options] -- <test command>"
+#: How long to wait for room on a busy runner before running unsplit.
+DEFAULT_WAIT_S = 90
+#: Pauses between asking again: short at first, then every 30 s.
+WAIT_STEPS_S = (5, 10, 20, 30)
 
 
 class UsageError(Exception):
@@ -78,6 +82,14 @@ def parse_args(argv: Sequence[str]) -> Tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--working-directory", default=".", metavar="DIR")
     parser.add_argument("--shell", metavar="SCRIPT", help="the test command as one string (the action's run input)")
     parser.add_argument(
+        "--wait-for-capacity",
+        type=int,
+        default=DEFAULT_WAIT_S,
+        metavar="SECONDS",
+        help="when the runner has no room to split right now, keep asking for this long before "
+        "running the tests unsplit (default %d; 0 to not wait)" % DEFAULT_WAIT_S,
+    )
+    parser.add_argument(
         "--prepare",
         metavar="SCRIPT",
         help="a shell command to run first, in this job, with network (install dependencies, build); "
@@ -108,20 +120,41 @@ def resolve_command(args: argparse.Namespace, command: List[str]) -> Tuple[Optio
     return None, "the command uses shell syntax; to split it, put a single test command in run"
 
 
-def choose_backend(name: str, timings_key: str) -> Backend:
-    """The backend; a LocalBackend (with the reason) when splitting isn't available here."""
+def requested_parts(args: argparse.Namespace) -> Optional[int]:
+    return None if args.parts == "auto" else int(args.parts)
+
+
+def choose_backend(name: str, timings_key: str, args: argparse.Namespace, sleep=time.sleep,
+                   clock=time.monotonic) -> Backend:
+    """The backend; a LocalBackend (with the reason) when splitting isn't available here. A busy
+    runner is asked again, with pauses, for up to ``--wait-for-capacity`` seconds."""
+    requested = requested_parts(args)
     if name == "local":
-        return LocalBackend("splitting was turned off")
+        return LocalBackend("splitting was turned off", "turned-off", requested)
     if name == "serial":
         return SerialBackend()
     from .host import HostBackend, HostUnavailable
 
-    try:
-        return HostBackend.connect(timings_key=timings_key)
-    except HostUnavailable as error:
-        if name == "host":
-            raise UsageError("no Vitko host to split tests on: %s" % error) from None
-        return LocalBackend(str(error) or "splitting needs a Vitko runner")
+    deadline = clock() + max(0, args.wait_for_capacity)
+    attempt = 0
+    while True:
+        try:
+            return HostBackend.connect(timings_key=timings_key)
+        except HostUnavailable as error:
+            reason = str(error) or "splitting needs a Vitko runner"
+            code = unsplit_code(reason)
+            if name == "host":
+                raise UsageError("no Vitko host to split tests on: %s" % reason) from None
+            left = deadline - clock()
+            if code != "host-busy" or left <= 0:
+                if code == "host-busy" and args.wait_for_capacity > 0:
+                    reason += "; waited %ds for room" % args.wait_for_capacity
+                return LocalBackend(reason, code, requested, 0 if code == "host-busy" else None)
+            pause = min(WAIT_STEPS_S[min(attempt, len(WAIT_STEPS_S) - 1)], left)
+            print("This runner has no room to split the tests right now; asking again in %ds "
+                  "(waiting up to %ds)." % (round(pause), args.wait_for_capacity), flush=True)
+            sleep(pause)
+            attempt += 1
 
 
 def run_prepare(script: str, cwd: str) -> int:
@@ -144,10 +177,11 @@ def main(argv: Sequence[str]) -> int:
             if code != 0:
                 return code
         if argv_resolved is None:
-            return LocalBackend(unsplittable or "").run_unsplit(["bash", "-c", args.shell], cwd)
+            return LocalBackend(unsplittable or "", "shell-script", requested_parts(args)).run_unsplit(
+                ["bash", "-c", args.shell], cwd)
         tool = adapters.detect(argv_resolved) if args.tool == "auto" else args.tool
         key = plan.timings_key(tool, argv_resolved, os.environ.get("GITHUB_REPOSITORY", ""))
-        backend = choose_backend(args.backend, key)
+        backend = choose_backend(args.backend, key, args)
     except UsageError as error:
         print("vitko runners split-tests: %s" % error, file=sys.stderr)
         return 2
@@ -159,7 +193,8 @@ def main(argv: Sequence[str]) -> int:
         return split(args, argv_resolved, cwd, tool, key, backend)
     except HostUnavailable as error:
         backend.close()
-        return LocalBackend(str(error) or "the host could not split the tests").run_unsplit(argv_resolved, cwd)
+        return LocalBackend(str(error) or "the host could not split the tests", None, requested_parts(args),
+                            backend.max_parts()).run_unsplit(argv_resolved, cwd)
     except HostFailed as error:
         print(
             "::error::Split tests failed: %s" % error
@@ -224,11 +259,13 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
         if prepared.exit_code is not None:
             return prepared.exit_code
         requested = None if args.parts == "auto" else int(args.parts)
+        asked, one_part_reason, notes = requested, "", []
         if requested is None and tool == "command" and not uses_part_variables(argv):
+            one_part_reason = "command-not-split"
+            notes.append("Running in one part: the command doesn't use VITKO_PART or VITKO_PARTS, so every part "
+                         "would run all of it. Run a test tool this action splits (pytest, cargo nextest, jest, "
+                         "vitest, go test), or split with those variables and set parts.")
             # Every part would run the whole command: more time and money, nothing split.
-            print("Running in one part: the command doesn't use VITKO_PART or VITKO_PARTS, so every part "
-                  "would run all of it. Run a test tool this action splits (pytest, cargo nextest, jest, "
-                  "vitest, go test), or split with those variables and set parts.", flush=True)
             requested = 1
         parts = plan.choose_parts(requested, backend.max_parts(), prepared.unit_count, timings, prepared.units or (),
                                   adapter.unit_guess)
@@ -237,11 +274,18 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
         if requested is None and parts == 1 and backend.max_parts() > 1:
             found = plan.suite_estimate(prepared.units or (), timings, adapter.unit_guess)
             if found is not None and found[0] < plan.SPLIT_MIN_SECONDS:
-                print(short_suite_notice(tool, found, len(prepared.units or ())), flush=True)
+                one_part_reason = "short-suite"
+                notes.append(short_suite_notice(tool, found, len(prepared.units or ())))
+        if requested is not None and requested > parts and backend.max_parts() < requested:
+            capped = "Asked for %d parts; this runner allowed %d." % (requested, backend.max_parts())
+            print(capped, flush=True)
+            notes.append(capped)
         specs = adapter.specs(groups, parts)
         runner = backend if parts > 1 else SerialBackend()
         outcomes = runner.run_parts(plan_dir, specs, on_event(parts))
         report = build_report(adapter, prepared, specs, outcomes, int((time.monotonic() - started) * 1000))
+        report.notes.extend(notes + adapter.notes(report))
+        report.parts_requested, report.parts_allowed, report.one_part_reason = asked, backend.max_parts(), one_part_reason
         results.print_report(report)
         results.publish(report, args.junit)
         if args.results:

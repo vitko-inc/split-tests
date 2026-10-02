@@ -19,6 +19,12 @@ inputs:
     description: How many parts to split the tests into, or `auto` to let Vitko Runners choose.
     required: false
     default: auto
+  wait-for-capacity:
+    description: >-
+      When the runner has no room to split the tests right now, keep asking for up to this many
+      seconds before running them unsplit in this job. 0 runs them unsplit at once.
+    required: false
+    default: "90"
   tool:
     description: >-
       The test tool (auto, pytest, nextest, jest, vitest, go or command). `auto` works it out from
@@ -57,6 +63,17 @@ outputs:
   failed:
     description: How many tests failed.
     value: ${{ steps.split.outputs.failed }}
+  unsplit-reason:
+    description: >-
+      Why the tests ran in one part, empty when they were split: host-busy, not-vitko, setup,
+      host-error, turned-off, shell-script, short-suite or command-not-split.
+    value: ${{ steps.split.outputs.unsplit-reason }}
+  parts-requested:
+    description: The parts input (a number, or auto).
+    value: ${{ steps.split.outputs.parts-requested }}
+  parts-allowed:
+    description: How many parts the runner allowed (0 when it had no room; empty off Vitko Runners).
+    value: ${{ steps.split.outputs.parts-allowed }}
 
 runs:
   using: composite
@@ -72,10 +89,12 @@ runs:
         SPLIT_TESTS_JUNIT: ${{ inputs.junit }}
         SPLIT_TESTS_TIMINGS: ${{ inputs.timings-file }}
         SPLIT_TESTS_PREPARE: ${{ inputs.prepare }}
+        SPLIT_TESTS_WAIT: ${{ inputs.wait-for-capacity }}
       run: |
         args=(runners split-tests --parts "$SPLIT_TESTS_PARTS" --tool "$SPLIT_TESTS_TOOL")
         for name in $SPLIT_TESTS_ENV; do args+=(--env "$name"); done
         if [ -n "$SPLIT_TESTS_JUNIT" ]; then args+=(--junit "$SPLIT_TESTS_JUNIT"); fi
         if [ -n "$SPLIT_TESTS_TIMINGS" ]; then args+=(--timings "$SPLIT_TESTS_TIMINGS"); fi
         if [ -n "$SPLIT_TESTS_PREPARE" ]; then args+=(--prepare "$SPLIT_TESTS_PREPARE"); fi
+        if [ -n "$SPLIT_TESTS_WAIT" ]; then args+=(--wait-for-capacity "$SPLIT_TESTS_WAIT"); fi
         exec python3 "$GITHUB_ACTION_PATH/vitko" "${args[@]}" --shell "$SPLIT_TESTS_RUN"

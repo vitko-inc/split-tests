@@ -49,6 +49,10 @@ class Report:
     wall_ms: int = 0
     notes: List[str] = field(default_factory=list)
     extra_problems: List[str] = field(default_factory=list)
+    # For the step outputs: what was asked for, what the runner allowed, and why one part.
+    parts_requested: Optional[int] = None
+    parts_allowed: Optional[int] = None
+    one_part_reason: str = ""
 
     @property
     def results(self) -> List[TestResult]:
@@ -288,6 +292,8 @@ def step_summary(report: Report) -> str:
             duration(report.wall_ms),
         )
     )
+    for note in report.notes:
+        rows += ["", "> " + note]
     failures = report.failures()
     if failures:
         rows += ["", "Failed tests:", ""] + [
@@ -310,4 +316,6 @@ def publish(report: Report, junit_path: Optional[str]) -> None:
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as f:
-            f.write("junit=%s\nparts=%d\nfailed=%d\n" % (junit_path or "", len(report.parts), len(report.failures())))
+            f.write("junit=%s\nparts=%d\nfailed=%d\nunsplit-reason=%s\nparts-requested=%s\nparts-allowed=%s\n" % (
+                junit_path or "", len(report.parts), len(report.failures()), report.one_part_reason,
+                report.parts_requested or "auto", "" if report.parts_allowed is None else report.parts_allowed))
