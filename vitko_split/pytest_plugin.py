@@ -47,7 +47,8 @@ def _wait_for_part(d):
     while not os.path.exists(path):
         time.sleep(0.05)
     while True:  # the writer may not have finished the line yet
-        text = open(path).read().strip()
+        with open(path) as f:
+            text = f.read().strip()
         if text:
             return int(text)
         time.sleep(0.05)

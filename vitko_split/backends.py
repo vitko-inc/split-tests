@@ -249,12 +249,13 @@ class SerialBackend(Backend):
         except FileNotFoundError:
             text = "Command not found: %s\n" % spec.argv[0]
             return PartOutcome(spec.part, 127, text, {}, 0, 0)
-        assert proc.stdout is not None
-        for raw in iter(proc.stdout.readline, b""):
-            text = raw.decode("utf-8", "replace")
-            chunks.append(text)
-            on_event({"type": "output", "part": spec.part, "data": text})
-        code = proc.wait()
+        with proc:
+            assert proc.stdout is not None
+            for raw in iter(proc.stdout.readline, b""):
+                text = raw.decode("utf-8", "replace")
+                chunks.append(text)
+                on_event({"type": "output", "part": spec.part, "data": text})
+            code = proc.wait()
         return PartOutcome(
             spec.part,
             code,
@@ -291,7 +292,8 @@ def _exit_code_from(info: dict) -> int:
     path = info.get("exitFile")
     if path and os.path.exists(path):
         try:
-            return int(open(path).read().strip())
+            with open(path) as f:
+                return int(f.read().strip())
         except ValueError:
             pass
     return 0
