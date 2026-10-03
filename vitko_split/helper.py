@@ -291,10 +291,11 @@ def run_command(spec: dict, host: Lines) -> int:
     except OSError as error:
         host.send({"type": "output", "data": "Could not start the tests: %s\n" % error})
         return 127
-    assert proc.stdout is not None
-    for chunk in iter(lambda: proc.stdout.read1(65536), b""):
-        host.send({"type": "output", "data": chunk.decode("utf-8", "replace")})
-    return proc.wait()
+    with proc:
+        assert proc.stdout is not None
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+            host.send({"type": "output", "data": chunk.decode("utf-8", "replace")})
+        return proc.wait()
 
 
 def run_collected(collect: dict, part: int, host: Lines) -> int:
@@ -360,13 +361,12 @@ _collectors: Dict[int, subprocess.Popen] = {}
 
 
 def start_collector(req: dict) -> dict:
-    log_file = open(req["log"], "wb")
-    os.fchown(log_file.fileno(), req["uid"] if req.get("uid") is not None else -1,
-              req["gid"] if req.get("gid") is not None else -1)
-    proc = subprocess.Popen(req["argv"], cwd=req["cwd"], env=req["env"], stdin=subprocess.DEVNULL,
-                            stdout=log_file, stderr=subprocess.STDOUT,
-                            preexec_fn=demote(req.get("uid"), req.get("gid")))
-    log_file.close()
+    with open(req["log"], "wb") as log_file:
+        os.fchown(log_file.fileno(), req["uid"] if req.get("uid") is not None else -1,
+                  req["gid"] if req.get("gid") is not None else -1)
+        proc = subprocess.Popen(req["argv"], cwd=req["cwd"], env=req["env"], stdin=subprocess.DEVNULL,
+                                stdout=log_file, stderr=subprocess.STDOUT,
+                                preexec_fn=demote(req.get("uid"), req.get("gid")))
     _collectors[proc.pid] = proc
     if req.get("exitFile"):
         threading.Thread(target=_record_exit, args=(proc, req["exitFile"]), daemon=True).start()
@@ -396,6 +396,13 @@ def split(req: dict, cli: Lines) -> None:
     global _plan_dir
     _plan_dir = str(req["planDir"])
     conn = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    try:
+        _split(conn, req, cli)
+    finally:
+        conn.close()
+
+
+def _split(conn: socket.socket, req: dict, cli: Lines) -> None:
     conn.settimeout(30)
     try:
         conn.connect((HOST_CID, HOST_PORT))
@@ -440,7 +447,6 @@ def split(req: dict, cli: Lines) -> None:
             host.recv()  # the host's receipt
         except (OSError, ValueError):
             pass
-    conn.close()
 
 
 def serve_control(path: str, owner_uid: int) -> None:
