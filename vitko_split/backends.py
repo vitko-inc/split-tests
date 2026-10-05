@@ -86,6 +86,10 @@ class Backend:
     def store_timings(self, key: str, data: dict) -> None:
         return None
 
+    def stores_unsplit(self) -> bool:
+        """Whether timings of a run that wasn't split are kept (the cost model needs them)."""
+        return False
+
     def close(self) -> None:
         return None
 

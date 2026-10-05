@@ -19,12 +19,20 @@ inputs:
     description: How many parts to split the tests into, or `auto` to let Vitko Runners choose.
     required: false
     default: auto
+  optimize:
+    description: >-
+      With `parts: auto`, what to choose the number of parts for: `cost` (split only when it
+      costs no more than one part), `balanced` (split when each extra billed second saves at least
+      a second of waiting) or `speed` (split for the shortest wait). Ignored when parts is a number.
+    required: false
+    default: balanced
   wait-for-capacity:
     description: >-
       When the runner has no room to split the tests right now, keep asking for up to this many
-      seconds before running them unsplit in this job. 0 runs them unsplit at once.
+      seconds before running them unsplit in this job. 0 runs them unsplit at once. The runner
+      already frees idle spare capacity for a split, so a long wait rarely helps.
     required: false
-    default: "90"
+    default: "15"
   tool:
     description: >-
       The test tool (auto, pytest, nextest, jest, vitest, go or command). `auto` works it out from
@@ -66,7 +74,7 @@ outputs:
   unsplit-reason:
     description: >-
       Why the tests ran in one part, empty when they were split: host-busy, not-vitko, setup,
-      host-error, turned-off, shell-script, short-suite or command-not-split.
+      host-error, turned-off, shell-script, short-suite, command-not-split, learning or costs-more.
     value: ${{ steps.split.outputs.unsplit-reason }}
   parts-requested:
     description: The parts input (a number, or auto).
@@ -84,6 +92,7 @@ runs:
       env:
         SPLIT_TESTS_RUN: ${{ inputs.run }}
         SPLIT_TESTS_PARTS: ${{ inputs.parts }}
+        SPLIT_TESTS_OPTIMIZE: ${{ inputs.optimize }}
         SPLIT_TESTS_TOOL: ${{ inputs.tool }}
         SPLIT_TESTS_ENV: ${{ inputs.env }}
         SPLIT_TESTS_JUNIT: ${{ inputs.junit }}
@@ -92,6 +101,7 @@ runs:
         SPLIT_TESTS_WAIT: ${{ inputs.wait-for-capacity }}
       run: |
         args=(runners split-tests --parts "$SPLIT_TESTS_PARTS" --tool "$SPLIT_TESTS_TOOL")
+        if [ -n "$SPLIT_TESTS_OPTIMIZE" ]; then args+=(--optimize "$SPLIT_TESTS_OPTIMIZE"); fi
         for name in $SPLIT_TESTS_ENV; do args+=(--env "$name"); done
         if [ -n "$SPLIT_TESTS_JUNIT" ]; then args+=(--junit "$SPLIT_TESTS_JUNIT"); fi
         if [ -n "$SPLIT_TESTS_TIMINGS" ]; then args+=(--timings "$SPLIT_TESTS_TIMINGS"); fi

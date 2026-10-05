@@ -111,14 +111,18 @@ def clean_timings(data: object) -> Optional[Dict[str, float]]:
     return {str(k): float(v) for k, v in tests.items() if isinstance(v, (int, float)) and v >= 0}
 
 
-def timings_document(tool: str, tests: Dict[str, float]) -> dict:
-    return {"version": TIMINGS_VERSION, "tool": tool, "tests": {k: round(v, 4) for k, v in sorted(tests.items())}}
+def timings_document(tool: str, tests: Dict[str, float], runs: Optional[List[dict]] = None) -> dict:
+    """The stored document: each test's seconds, and the step's recent runs (``cost.py``)."""
+    doc = {"version": TIMINGS_VERSION, "tool": tool, "tests": {k: round(v, 4) for k, v in sorted(tests.items())}}
+    if runs:
+        doc["runs"] = list(runs)
+    return doc
 
 
-def save_timings(path: str, tool: str, tests: Dict[str, float]) -> None:
+def save_timings(path: str, tool: str, tests: Dict[str, float], runs: Optional[List[dict]] = None) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(timings_document(tool, tests), f)
+        json.dump(timings_document(tool, tests, runs), f)
     os.replace(tmp, path)
 
 
