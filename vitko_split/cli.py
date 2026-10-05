@@ -14,7 +14,7 @@ import tempfile
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from . import adapters, plan, results
+from . import adapters, cost, plan, results
 from .backends import unsplit_code, Backend, LocalBackend, PartOutcome, PartSpec, SerialBackend
 from .envpolicy import declared_env
 
@@ -44,8 +44,9 @@ def has_shell_syntax(script: str) -> bool:
             return True
     return quote is not None  # an unclosed quote: let the shell report it
 USAGE = "vitko runners split-tests [options] -- <test command>"
-#: How long to wait for room on a busy runner before running unsplit.
-DEFAULT_WAIT_S = 90
+#: How long to wait for room on a busy runner before running unsplit. The host stops idle
+#: standbys to make room itself, so a refusal means there is no room to take: don't wait long.
+DEFAULT_WAIT_S = 15
 #: Pauses between asking again: short at first, then every 30 s.
 WAIT_STEPS_S = (5, 10, 20, 30)
 
@@ -69,6 +70,12 @@ def parse_args(argv: Sequence[str]) -> Tuple[argparse.Namespace, List[str]]:
     )
     parser.add_argument("--parts", default="auto", help="auto, or how many parts")
     parser.add_argument("--tool", default="auto", choices=("auto",) + adapters.TOOLS)
+    parser.add_argument(
+        "--optimize",
+        default=cost.DEFAULT_MODE,
+        choices=cost.MODES,
+        help="with --parts auto: what to choose the number of parts for (default %s)" % cost.DEFAULT_MODE,
+    )
     parser.add_argument(
         "--env",
         action="append",
@@ -207,6 +214,25 @@ def main(argv: Sequence[str]) -> int:
         backend.close()
 
 
+def stored_document(args: argparse.Namespace, backend: Backend) -> Optional[dict]:
+    """The whole stored timings document (test timings and the step's run history)."""
+    if args.timings:
+        try:
+            with open(args.timings) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+    offered = backend.timings()
+    return offered if isinstance(offered, dict) else None
+
+
+def billed_seconds(parts: int, outcomes: List[PartOutcome], step_wall: float) -> float:
+    """What the run is billed: the step's own time in one part, every copy's time when split."""
+    if parts <= 1:
+        return step_wall
+    return sum(o.wall_ms for o in outcomes) / 1000.0 or step_wall
+
+
 def load_timings(args: argparse.Namespace, backend: Backend) -> Optional[Dict[str, float]]:
     if args.timings:
         return plan.load_timings(args.timings)
@@ -254,6 +280,7 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
             argv=argv, cwd=cwd, env=env, plan_dir=plan_dir, home=HOME, backend=backend, uid=os.getuid(), gid=os.getgid()
         )
         adapter = adapters.make(tool, ctx)
+        stored = stored_document(args, backend)
         timings = load_timings(args, backend)
         prepared = adapter.prepare()
         if prepared.exit_code is not None:
@@ -267,11 +294,24 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
                          "vitest, go test), or split with those variables and set parts.")
             # Every part would run the whole command: more time and money, nothing split.
             requested = 1
-        parts = plan.choose_parts(requested, backend.max_parts(), prepared.unit_count, timings, prepared.units or (),
-                                  adapter.unit_guess)
+        runs = cost.clean_runs(stored)
+        parts, by_cost = None, False
+        if requested is None and backend.stores_unsplit():
+            limit = plan.choose_parts(None, backend.max_parts(), prepared.unit_count)
+            parts, why = cost.decide(runs, limit, args.optimize)
+            if parts is not None:
+                by_cost = True
+                one_part_reason = why if parts == 1 else ""
+                note = cost.explain(runs, parts, limit, args.optimize)
+                print(note, flush=True)
+                if parts == 1:
+                    notes.append(note)
+        if parts is None:
+            parts = plan.choose_parts(requested, backend.max_parts(), prepared.unit_count, timings,
+                                      prepared.units or (), adapter.unit_guess)
         groups = plan.partition(prepared.units, parts, timings) if prepared.units is not None else None
         announce(tool, parts, prepared, timings)
-        if requested is None and parts == 1 and backend.max_parts() > 1:
+        if requested is None and parts == 1 and backend.max_parts() > 1 and not by_cost:
             found = plan.suite_estimate(prepared.units or (), timings, adapter.unit_guess)
             if found is not None and found[0] < plan.SPLIT_MIN_SECONDS:
                 one_part_reason = "short-suite"
@@ -282,7 +322,9 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
             notes.append(capped)
         specs = adapter.specs(groups, parts)
         runner = backend if parts > 1 else SerialBackend()
+        running = time.monotonic()
         outcomes = runner.run_parts(plan_dir, specs, on_event(parts))
+        step_wall = time.monotonic() - running
         report = build_report(adapter, prepared, specs, outcomes, int((time.monotonic() - started) * 1000))
         report.notes.extend(notes + adapter.notes(report))
         report.parts_requested, report.parts_allowed, report.one_part_reason = asked, backend.max_parts(), one_part_reason
@@ -291,7 +333,9 @@ def split(args: argparse.Namespace, argv: List[str], cwd: str, tool: str, key: s
         if args.results:
             with open(args.results, "w") as f:
                 json.dump(report.outcomes(), f, indent=1, sort_keys=True)
-        keep_timings(args, backend, tool, key, timings, adapter.timings(report.results))
+        if report.ok():
+            runs = cost.add_run(runs, parts, billed_seconds(parts, outcomes, step_wall), step_wall)
+        keep_timings(args, backend, tool, key, timings, adapter.timings(report.results), runs)
         return 0 if report.ok() else 1
     finally:
         shutil.rmtree(plan_dir, ignore_errors=True)
@@ -346,11 +390,12 @@ def keep_timings(
     key: str,
     old: Optional[Dict[str, float]],
     new: Dict[str, float],
+    runs: Optional[List[dict]] = None,
 ) -> None:
-    if not new:
+    if not new and not runs:
         return
     merged = dict(old or {})
     merged.update(new)
     if args.timings:
-        plan.save_timings(args.timings, tool, merged)
-    backend.store_timings(key, plan.timings_document(tool, merged))
+        plan.save_timings(args.timings, tool, merged, runs)
+    backend.store_timings(key, plan.timings_document(tool, merged, runs))

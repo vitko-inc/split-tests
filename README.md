@@ -113,7 +113,8 @@ Vitest, use a separate config or a file-name pattern for the network tests.
 |---|---|---|
 | `run` | (required) | Your test command. |
 | `prepare` | | A command to run first, in this job, with network: install dependencies and build. |
-| `parts` | `auto` | How many parts. `auto` picks a number that suits your plan and the size of your test suite: a suite estimated at under a minute runs in one part, because splitting it would cost more time and money than it saves. |
+| `parts` | `auto` | How many parts. `auto` chooses from how long this step took before, by `optimize` (see [How many parts](#how-many-parts)). A number always splits into that many parts, up to your plan's limit. |
+| `optimize` | `balanced` | With `parts: auto`: `cost`, `balanced` or `speed`. |
 | `wait-for-capacity` | `90` | When the runner has no room to split right now, how many seconds to keep asking before running the tests unsplit. `0` doesn't wait. |
 | `tool` | `auto` | `pytest`, `nextest`, `jest`, `vitest`, `go` or `command`. `auto` works it out from `run`. |
 | `env` | | Extra environment variables your tests need, by name. |
@@ -125,6 +126,41 @@ Outputs: `junit` (the report's path), `parts` (how many ran), `failed` (how many
 `unsplit-reason` (why the tests ran in one part; empty when they were split), `parts-requested`
 and `parts-allowed`.
 When the tests run unsplit (on a runner that can't split them), `parts` is `1` and there is no report: `junit` and `failed` are empty.
+
+## How many parts
+
+Every part is a copy of your job, and you pay for the time each copy runs. Each copy also repeats
+some fixed work before its first test: the test tool starts, loads your code and, for tools that
+compile or transform it (TypeScript, for example), does that again. So splitting buys a shorter
+wait with extra billed time, and for some suites the extra time is larger than the wait it saves.
+
+With `parts: auto`, the step keeps a short history of its own runs: how many parts, how long the
+copies ran in total, and how long the step took. From it, it estimates the step's time in one part
+and the extra time each part adds, and chooses the number of parts by `optimize`:
+
+| `optimize` | Splits when |
+|---|---|
+| `cost` | Splitting costs no more than running in one part. |
+| `balanced` (default) | Every extra billed second saves at least one second of waiting. |
+| `speed` | It shortens the wait, accepting up to 10 billed seconds per second saved. |
+
+When splitting would cost more than it saves, the tests run in one part and the log says so, with
+the estimates. If your suite's tests have little fixed work per part, splitting can even cost
+less than one part, and every setting splits.
+
+The first two runs of a step measure: the first runs in one part, the second in two parts. From
+the third run on, the step chooses by cost. As your suite grows, the history follows it, and a step that stopped splitting starts
+again once splitting pays off. With `optimize: speed`, the step splits from the first run, as it
+would by the suite's size, and uses the history once it has one.
+
+```yaml
+- uses: vitko-inc/split-tests@v1
+  with:
+    run: npx jest --ci
+    optimize: speed   # or cost
+```
+
+Set `parts` to a number to choose yourself.
 
 ## How the tests are shared out
 
@@ -175,6 +211,8 @@ for and allowed), and the `unsplit-reason` output:
 | `shell-script` | `run` is a shell script, not a single test command. |
 | `short-suite` | `parts: auto` chose one part: the suite takes under a minute. |
 | `command-not-split` | `parts: auto` chose one part: a `tool: command` command that doesn't use `VITKO_PART`. |
+| `learning` | `parts: auto` ran in one part to measure the step's time in one part (the step's first run). |
+| `costs-more` | `parts: auto` chose one part: by this step's history, splitting would cost more than it saves for your `optimize` setting. |
 
 When the runner is busy, the step asks again for up to `wait-for-capacity` seconds (90 by
 default), with pauses that grow from 5 to 30 seconds, before running the tests unsplit.
@@ -200,11 +238,13 @@ your command once, with all your tests, exactly as a plain `run:` step would. Th
 ## Billing
 
 You pay for the time the copies run. The original job's wait while its copies run isn't
-charged.
+charged. Since each copy repeats some start-up work, a split usually costs somewhat more in total
+than one part; `parts: auto` weighs that against the time it saves (see
+[How many parts](#how-many-parts)).
 
 ## Limits
 
-- Up to your plan's limit of parts at once. With `auto`, fewer parts when the suite is short, and one part when it's estimated at under a minute (from past timings, or from the number of tests the first time). The log says so; set `parts` to a number to split anyway.
+- Up to your plan's limit of parts at once. With `auto`, the number of parts that `optimize` favours, and one part when the suite is short or splitting would cost more than it saves. The log says so; set `parts` to a number to split anyway.
 - One split-tests step at a time in a job, and up to four in one job.
 - The parts can't reach the network: install and build before the split (see above), and run
   tests that need the network in a separate step.

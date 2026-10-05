@@ -92,6 +92,26 @@ def _probe(timings_key: Optional[str]) -> dict:
     return welcome
 
 
+def _store_unsplit(key: str, packed: dict) -> bool:
+    """Stores the timings of a run that wasn't split: a ``purpose: timings`` hello takes no room
+    on the host and is answered with a receipt. Best effort: False when they weren't kept."""
+    if not hasattr(socket, "AF_VSOCK"):
+        return False
+    sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    sock.settimeout(PROBE_TIMEOUT_S)
+    try:
+        sock.connect((HOST_CID, JOB_PORT))
+        lines = _Lines(sock)
+        lines.send({"type": "hello", "protocol": PROTOCOL, "timingsKey": key, "purpose": "timings"})
+        lines.send({"type": "timings", "key": key, "data": packed})
+        receipt = lines.recv() or {}
+        return receipt.get("type") == "timings-received" and receipt.get("stored") is True
+    except (OSError, ValueError, HostFailed):
+        return False
+    finally:
+        sock.close()
+
+
 class HostBackend(Backend):
     name = "host"
     copies_job = True
@@ -99,6 +119,7 @@ class HostBackend(Backend):
     def __init__(self, welcome: dict, workdir: str, control: str, unit: str) -> None:
         self._max_parts = max(1, int(welcome.get("maxParts") or 1))
         self._timings = welcome.get("timings")
+        self._stores_unsplit = welcome.get("unsplitTimings") is True
         self._workdir, self._control, self._unit = workdir, control, unit
         self._split: Optional[_Lines] = None
         self._collector_logs: Dict[int, str] = {}
@@ -229,8 +250,14 @@ class HostBackend(Backend):
                                               + "\nThis part did not finish.\n", {}, 0)
         return [done[s.part] for s in specs]
 
+    def stores_unsplit(self) -> bool:
+        return self._stores_unsplit
+
     def store_timings(self, key: str, data: dict) -> None:
         if self._split is None:
+            # Not split: send them to the host directly, when it keeps them for unsplit runs.
+            if self._stores_unsplit:
+                _store_unsplit(key, _pack_timings(data))
             return
         try:
             self._split.send({"cmd": "timings", "key": key, "data": _pack_timings(data)})
