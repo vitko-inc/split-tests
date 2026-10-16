@@ -1,6 +1,8 @@
-# Split tests
+# Split tests: split a test suite across parallel machines in GitHub Actions
 
-A GitHub Action for [Vitko Runners](https://runners.vitko.inc). It runs your test command as
+Split one test suite across parallel machines with a single GitHub Actions workflow step: pytest,
+cargo nextest, Go, Jest and Vitest, or any test command that can run its own share. A GitHub
+Action for [Vitko Runners](https://runners.vitko.inc). It runs your test command as
 several parts at the same time. Each part runs in its own copy of your job, and the results come
 back to the original job: one log, one list of failures, one pass or fail.
 
