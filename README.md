@@ -13,6 +13,20 @@ else.
 On any other runner (GitHub-hosted, your own machines) the step simply runs all your tests, as a
 plain `run:` step would, so the same workflow works everywhere.
 
+```yaml
+jobs:
+  test:
+    runs-on: vitko-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: uv sync --locked
+      - uses: vitko-inc/split-tests@v1   # one step: the suite runs as parallel parts
+        with:
+          run: uv run --locked pytest -q
+```
+
+Full documentation: [Test parallelization on Vitko Runners](https://runners.vitko.inc/docs/split-tests/).
+
 ## Add it to your workflow
 
 Replace your test step with the `vitko-inc/split-tests` action, and put your test command in
