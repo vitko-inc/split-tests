@@ -1,4 +1,4 @@
-name: Split tests
+name: Vitko split tests
 description: >-
   Runs your test command as several parts at once, each in its own copy of this job, and reports
   the results back in this job. On other runners it runs all your tests here, as usual.
