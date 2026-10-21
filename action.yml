@@ -1,8 +1,9 @@
 name: Vitko split tests
-description: >-
-  Runs your test command as several parts at once, each in its own copy of this job, and reports
-  the results back in this job. On other runners it runs all your tests here, as usual.
+description: Run your tests as parallel parts with one step on Vitko Runners; on any other runner they run once.
 author: Vitko Runners
+branding:
+  icon: layers
+  color: blue
 
 inputs:
   run:
