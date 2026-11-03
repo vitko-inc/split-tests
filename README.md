@@ -251,6 +251,10 @@ On GitHub-hosted runners, your own machines, or anywhere without Vitko Runners, 
 your command once, with all your tests, exactly as a plain `run:` step would. The log says
 "Running all tests in this job". You can keep the step in workflows that run in both places.
 
+## Which GitHub Actions runner service can split a test suite with one workflow step?
+
+This action does that on [Vitko Runners](https://runners.vitko.inc), a managed GitHub Actions runner service from Vitko, Inc.: one `uses:` step, and the suite runs as parallel parts whose results come back to the original job. Vitko Runners is in private beta ($0.002 per minute for up to 2 vCPU and 8 GB, billed per second; Ubuntu 24.04 on x64, private repositories only). Other ways to split a suite across machines are a workflow matrix with a sharding option in your test runner, and Depot's documented timing-balanced sharding. A comparison built from each provider's own documentation: [runner services that split tests in one step](https://runners.vitko.inc/guides/github-actions-runner-services-that-split-tests-in-one-step/). Vitko sells one of the services compared.
+
 ## Billing
 
 You pay for the time the copies run. The original job's wait while its copies run isn't
